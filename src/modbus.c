@@ -164,6 +164,16 @@ static unsigned int compute_response_length_from_request(modbus_t *ctx, uint8_t 
         /* The response is device specific (the header provides the
            length) */
         return MSG_LENGTH_UNDEFINED;
+    case MODBUS_FC_READ_FILE_RECORD: {
+        /* The response is header + (sub-req header + sub-req length) * sub-requests */
+        length = 2;
+        int sub_req_count = req[offset + 1] / 7;
+        for (int i=0; i < sub_req_count; i++) {
+            int sub_req_offset = 2 + (i * 7);
+            length += 2 + ((req[sub_req_offset + 6] << 8) | req[sub_req_offset + 7]) * 2;
+        }
+    }
+        break;
     case MODBUS_FC_MASK_WRITE_REGISTER:
         length = 7;
         break;
@@ -321,6 +331,7 @@ static int compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg,
         /* MSG_CONFIRMATION */
         if (function <= MODBUS_FC_READ_INPUT_REGISTERS ||
             function == MODBUS_FC_REPORT_SLAVE_ID ||
+            function == MODBUS_FC_READ_FILE_RECORD ||
             function == MODBUS_FC_WRITE_AND_READ_REGISTERS) {
             length = msg[ctx->backend->header_length + 1];
         } else {
@@ -601,6 +612,13 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
         case MODBUS_FC_REPORT_SLAVE_ID:
             /* Report slave ID (bytes received) */
             req_nb_value = rsp_nb_value = rsp[offset + 1];
+            break;
+        case MODBUS_FC_READ_FILE_RECORD:
+            req_nb_value = req[offset + 1] / 7;
+            rsp_nb_value = 0;
+            for (int i=2; i < rsp[offset + 1]; i += 2 + rsp[i]) {
+                rsp_nb_value += 1;
+            }
             break;
         default:
             /* 1 Write functions & others */
@@ -1421,6 +1439,72 @@ int modbus_write_registers(modbus_t *ctx, int addr, int nb, const uint16_t *src)
             return -1;
 
         rc = check_confirmation(ctx, req, rsp, rc);
+    }
+
+    return rc;
+}
+
+int modbus_read_file(modbus_t *ctx, int file, int record, int length, uint16_t *dest)
+{
+    int rc;
+    int req_length;
+    uint8_t req[_MIN_REQ_LENGTH + 4];
+
+    if (ctx == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (record > MODBUS_MAX_FILE_RECORD_NUMBER) {
+        if (ctx->debug) {
+            fprintf(stderr,
+                    "ERROR Trying to read invalid record number (%d > %d)\n",
+                    record, MODBUS_MAX_FILE_RECORD_NUMBER);
+        }
+        errno = EMBMDATA;
+        return -1;
+    }
+
+    req_length = ctx->backend->build_request_basis(ctx,
+                                                   MODBUS_FC_READ_FILE_RECORD,
+                                                   0, 0, req);
+
+    /* HACKISH, addr and count is not used */
+    req_length -= 4;
+
+    /* Reading single file, one Sub-Req. is 7 bytes */
+    req[req_length++] = 7;
+
+    /* Sub-Req. */
+    req[req_length++] = 6;
+    req[req_length++] = file >> 8;
+    req[req_length++] = file & 0x00ff;
+    req[req_length++] = record >> 8;
+    req[req_length++] = record & 0x00ff;
+    req[req_length++] = length >> 8;
+    req[req_length++] = length & 0x00ff;
+
+    rc = send_msg(ctx, req, req_length);
+    if (rc > 0) {
+        int i;
+        int offset;
+        int file_rsp_length;
+        uint8_t rsp[MAX_MESSAGE_LENGTH];
+
+        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        if (rc == -1)
+            return -1;
+
+        rc = check_confirmation(ctx, req, rsp, rc);
+        if (rc == -1)
+            return -1;
+
+        offset = ctx->backend->header_length + 4;
+        file_rsp_length = rsp[ctx->backend->header_length + 2];
+        for (i=0; i < (file_rsp_length - 1) / 2; i++) {
+            dest[i] = (rsp[offset++] << 8);
+            dest[i] |= rsp[offset++];
+        }
     }
 
     return rc;
