@@ -335,6 +335,11 @@ static int compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg,
             /* Include the ID and length of the following object */
             if(msg[ctx->backend->header_length + 6] > 1) {
                 length += 2;
+                /* For streaming objects, do not add the checksum length
+                   below, since the length here is the length to the next
+                   object, not the end of the message.
+                */
+                return length;
             }
         } else {
             length = 0;
